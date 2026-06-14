@@ -6,7 +6,7 @@ import base64
 import uuid
 import os
 from PIL import Image, ImageDraw, ImageFont
-from rembg import remove
+import requests
 
 app = FastAPI(title="Figurinha Copa 2026 API")
 
