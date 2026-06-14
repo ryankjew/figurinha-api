@@ -5,97 +5,168 @@ import io
 import base64
 import uuid
 import os
-import requests
 from PIL import Image, ImageDraw, ImageFont
+from rembg import remove
 
 app = FastAPI(title="Figurinha Copa 2026 API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Troque pelo dominio do seu Lovable em producao
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-REMOVE_BG_KEY = os.getenv("REMOVE_BG_API_KEY", "")
-
+# ─── COORDENADAS CALIBRADAS (template 1852x2457px) ────────────────────────────
 CONFIG = {
-    "face": {"x": 382, "y": 354, "width": 769, "height": 770},
-    "texts": {
-        "nome":  {"x": 771, "y": 2134, "size": 95,  "color": (255,255,255), "bold": True,  "uppercase": True},
-        "stats": {"x": 771, "y": 2234, "size": 65,  "color": (255,255,255), "bold": False, "uppercase": False},
-        "clube": {"x": 771, "y": 2364, "size": 65,  "color": (255,255,255), "bold": True,  "uppercase": True},
+    "template_size": (1852, 2457),
+
+    "face": {
+        "x": 382,
+        "y": 354,
+        "width": 769,
+        "height": 770,
     },
-    "watermark": {"text": "PREVIEW", "color": (255,255,255,70), "size": 160, "angle": 35},
+
+    "texts": {
+        "nome": {
+            "x": 771,
+            "y": 2134,
+            "size": 95,
+            "color": (255, 255, 255),
+            "bold": True,
+            "uppercase": True,
+        },
+        "stats": {
+            "x": 771,
+            "y": 2234,
+            "size": 65,
+            "color": (255, 255, 255),
+            "bold": False,
+            "uppercase": False,
+        },
+        "clube": {
+            "x": 771,
+            "y": 2364,
+            "size": 65,
+            "color": (255, 255, 255),
+            "bold": True,
+            "uppercase": True,
+        },
+    },
+
+    "watermark": {
+        "text": "PREVIEW",
+        "color": (255, 255, 255, 70),
+        "size": 160,
+        "angle": 35,
+    },
 }
 
 FONT_BOLD    = "fonts/Anton-Regular.ttf"
 FONT_REGULAR = "fonts/Roboto-Regular.ttf"
 
-def get_font(size, bold=False):
+
+def get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    path = FONT_BOLD if bold else FONT_REGULAR
     try:
-        return ImageFont.truetype(FONT_BOLD if bold else FONT_REGULAR, size)
-    except:
+        return ImageFont.truetype(path, size)
+    except Exception:
         return ImageFont.load_default()
 
+
 def remove_background(image_bytes: bytes) -> Image.Image:
-    if not REMOVE_BG_KEY:
-        raise HTTPException(status_code=500, detail="REMOVE_BG_API_KEY nao configurada")
-    resp = requests.post(
-        "https://api.remove.bg/v1.0/removebg",
-        files={"image_file": ("foto.jpg", image_bytes)},
-        data={"size": "auto"},
-        headers={"X-Api-Key": REMOVE_BG_KEY},
-    )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"remove.bg erro: {resp.text}")
-    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    output = remove(image_bytes)
+    return Image.open(io.BytesIO(output)).convert("RGBA")
 
-def compose_figurinha(face_img, nome, clube, peso, altura, data_nascimento, watermark=True):
+
+def compose_figurinha(
+    face_img: Image.Image,
+    nome: str,
+    clube: str,
+    peso: str,
+    altura: str,
+    data_nascimento: str,
+    watermark: bool = True,
+) -> Image.Image:
+
     if not os.path.exists("template.png"):
-        raise FileNotFoundError("template.png nao encontrado")
+        raise FileNotFoundError("template.png nao encontrado na raiz do projeto")
 
-    result = Image.open("template.png").convert("RGBA")
+    template = Image.open("template.png").convert("RGBA")
+    result   = template.copy()
+
+    # 1. Cola o rosto no placeholder
     fc = CONFIG["face"]
     face_resized = face_img.resize((fc["width"], fc["height"]), Image.LANCZOS)
 
+    # Mascara retangular com cantos arredondados
     mask = Image.new("L", (fc["width"], fc["height"]), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, fc["width"], fc["height"]], radius=60, fill=255)
+    draw_mask = ImageDraw.Draw(mask)
+    draw_mask.rounded_rectangle(
+        [0, 0, fc["width"], fc["height"]],
+        radius=60,
+        fill=255
+    )
 
-    layer = Image.new("RGBA", result.size, (0,0,0,0))
-    layer.paste(face_resized, (fc["x"], fc["y"]), mask)
-    result = Image.alpha_composite(result, layer)
+    face_layer = Image.new("RGBA", result.size, (0, 0, 0, 0))
+    face_layer.paste(face_resized, (fc["x"], fc["y"]), mask)
+    result = Image.alpha_composite(result, face_layer)
 
+    # 2. Escreve os textos
     draw = ImageDraw.Draw(result)
+
+    # Nome
     t = CONFIG["texts"]["nome"]
-    draw.text((t["x"], t["y"]), nome.upper() if t["uppercase"] else nome,
-              font=get_font(t["size"], t["bold"]), fill=t["color"], anchor="mm")
+    txt = nome.upper() if t["uppercase"] else nome
+    draw.text((t["x"], t["y"]), txt,
+              font=get_font(t["size"], t["bold"]),
+              fill=t["color"], anchor="mm")
 
+    # Stats: data | altura m | peso kg
     t = CONFIG["texts"]["stats"]
-    draw.text((t["x"], t["y"]), f"{data_nascimento} | {altura}m | {peso}kg",
-              font=get_font(t["size"], t["bold"]), fill=t["color"], anchor="mm")
+    stats = f"{data_nascimento} | {altura}m | {peso}kg"
+    draw.text((t["x"], t["y"]), stats,
+              font=get_font(t["size"], t["bold"]),
+              fill=t["color"], anchor="mm")
 
+    # Clube
     t = CONFIG["texts"]["clube"]
-    draw.text((t["x"], t["y"]), clube.upper() if t["uppercase"] else clube,
-              font=get_font(t["size"], t["bold"]), fill=t["color"], anchor="mm")
+    txt = clube.upper() if t["uppercase"] else clube
+    draw.text((t["x"], t["y"]), txt,
+              font=get_font(t["size"], t["bold"]),
+              fill=t["color"], anchor="mm")
 
+    # 3. Watermark
     if watermark:
-        wm = CONFIG["watermark"]
-        ov = Image.new("RGBA", result.size, (255,255,255,0))
-        d  = ImageDraw.Draw(ov)
-        f  = get_font(wm["size"], bold=True)
-        for y in range(-100, result.height+100, 280):
-            for x in range(-100, result.width+100, 420):
-                d.text((x,y), wm["text"], font=f, fill=wm["color"])
-        rot = ov.rotate(wm["angle"], expand=False).crop((0,0,result.width,result.height))
-        result = Image.alpha_composite(result.convert("RGBA"), rot)
+        result = add_watermark(result)
 
     return result
 
-def to_b64(img):
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG", quality=95)
-    return base64.b64encode(buf.getvalue()).decode()
+
+def add_watermark(img: Image.Image) -> Image.Image:
+    wm = CONFIG["watermark"]
+    overlay = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    draw    = ImageDraw.Draw(overlay)
+    font    = get_font(wm["size"], bold=True)
+
+    step_x, step_y = 420, 280
+    for y in range(-100, img.height + 100, step_y):
+        for x in range(-100, img.width + 100, step_x):
+            draw.text((x, y), wm["text"], font=font, fill=wm["color"])
+
+    rotated = overlay.rotate(wm["angle"], expand=False)
+    rotated = rotated.crop((0, 0, img.width, img.height))
+    return Image.alpha_composite(img.convert("RGBA"), rotated)
+
+
+def image_to_base64(img: Image.Image) -> str:
+    buffer = io.BytesIO()
+    img.convert("RGB").save(buffer, format="PNG", quality=95)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────────────────────
 
 @app.post("/gerar-figurinha")
 async def gerar_figurinha(
@@ -107,23 +178,46 @@ async def gerar_figurinha(
     data_nascimento: str = Form(...),
 ):
     try:
-        face = remove_background(await foto.read())
-        preview = compose_figurinha(face, nome, clube, peso, altura, data_nascimento, watermark=True)
-        fid = str(uuid.uuid4())
-        os.makedirs("figurinhas_geradas", exist_ok=True)
-        compose_figurinha(face, nome, clube, peso, altura, data_nascimento, watermark=False).convert("RGB").save(f"figurinhas_geradas/{fid}.png")
-        return JSONResponse({"success": True, "figurinha_id": fid, "preview_base64": to_b64(preview)})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        foto_bytes = await foto.read()
+        face_img   = remove_background(foto_bytes)
 
-@app.get("/figurinha/{fid}")
-async def get_figurinha(fid: str):
-    path = f"figurinhas_geradas/{fid}.png"
+        # Preview com watermark (para mostrar antes do pagamento)
+        preview = compose_figurinha(
+            face_img, nome, clube, peso, altura, data_nascimento,
+            watermark=True
+        )
+
+        # Versao limpa salva em disco (entregue apos pagamento)
+        figurinha_id = str(uuid.uuid4())
+        os.makedirs("figurinhas_geradas", exist_ok=True)
+
+        clean = compose_figurinha(
+            face_img, nome, clube, peso, altura, data_nascimento,
+            watermark=False
+        )
+        clean.convert("RGB").save(f"figurinhas_geradas/{figurinha_id}.png")
+
+        return JSONResponse({
+            "success": True,
+            "figurinha_id": figurinha_id,
+            "preview_base64": image_to_base64(preview),
+        })
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+
+
+@app.get("/figurinha/{figurinha_id}")
+async def get_figurinha(figurinha_id: str):
+    path = f"figurinhas_geradas/{figurinha_id}.png"
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Nao encontrada")
-    return JSONResponse({"success": True, "figurinha_base64": base64.b64encode(open(path,"rb").read()).decode()})
+        raise HTTPException(status_code=404, detail="Figurinha nao encontrada")
+    with open(path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+    return JSONResponse({"success": True, "figurinha_base64": img_b64})
+
 
 @app.get("/health")
 async def health():
